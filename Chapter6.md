@@ -67,6 +67,53 @@
 
 告知 MMU：当 CPU 切换到这个进程运行时，OS 会把这个新页表的物理起始地址写进 CPU 内部的一个特殊寄存器（比如 x86 的 CR3 或 ARM 的 TTBR）
 
+## Q5结合计算机层级构成图解释以上的关名词
+核心逻辑是：越往上越快、越贵、容量越小；越往下越慢、越便宜、容量越大
+<img width="828" height="623" alt="image" src="https://github.com/user-attachments/assets/0b623409-1122-4b06-a0c8-3cf16e559d2c" />
+
+L0: 寄存器 (Regs)：位于 CPU 核心内部。它们直接存放 CPU 正在处理的字（Words）。 这是全屋最快的“口袋”。
+
+L1, L2, L3 高速缓存 (Cache)：
+
+通常由 SRAM 组成。
+
+L1 存放从 L2 拿来的缓存行（Cache Lines）；L2 存放从 L3 拿来的；L3 则存放从主存拿来的。
+
+L4: 主存 (Main Memory)：
+
+由 DRAM 组成。
+
+它保存着从本地磁盘读取的磁盘块。
+
+L5: 本地二级存储 (Local Secondary Storage)：
+
+指你电脑里的 SSD（固态硬盘） 或 HDD（机械硬盘）。
+
+它们保存着从远程服务器下载的文件。
+
+L6: 远程二级存储：
+
+如 Web 服务器、云存储。
+
+***🥑Avocado Says Greenly**:
+主存指的就是图中的 L4 层级。 它是程序运行时的主要战场。
+
+RAM（随机存取存储器）就是主存。
+
+在硬件层面，你买的“内存条”就是 DRAM。
+
+虽然 Cache（SRAM）在广义上也是一种随机存取存储器，但在 99% 的对话中，RAM = 主存 = L4 = DRAM。
+
+页表 (Page Table) 存放：
+
+本体存放地：主存 (L4 / RAM)。由于页表通常很大（甚至几 MB），它必须完整地存在 DRAM 里。
+
+加速存放地：TLB (集成在 MMU 里)。为了翻译得快，MMU 会把最常用的页表项缓存到 TLB（这比 L1 Cache 还要靠近 CPU 核心）。
+
+缓存存放地：L1/L2/L3 Cache。当 MMU 在 TLB 没找到地址时，它会去查主存里的页表。由于局部性原理，页表的一部分内容往往会被自动缓存到 SRAM Cache 中，从而加快 MMU 的查询速度。
+
+
+
 
 
 
