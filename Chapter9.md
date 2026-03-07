@@ -1,7 +1,7 @@
 ## Q1 我们在Chapter6中已经探讨了CPU取出数据的完整流程，其中涉及到VA→PA的转换，那我们现在聊一下MMU到底是怎么根据虚拟地址翻译出物理地址的
 
 Before we get started 🥑 has something to say:
-✈️ARM架构中，虚拟地址会被拆分成Level0~Level3的索引L0index~L3index加上一个Page offset[11:0]。这个和我们在Chapter6中看到
+✈️ARM架构中，虚拟地址会被拆分成Level0~Level3的索引L0index~L3index加上一个Page offset。这个和我们在Chapter6中看到
 
 的金字塔硬件层级（它们是缓存层级 (Lx Cache)：它是物理硬件。它是 CPU 核心旁边的一块极速 SRAM 芯片。它决定了数据（无论是目录还是书本内容）放在离 CPU 多近的地方，他们是完全不相干的两个东西。
 
