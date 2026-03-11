@@ -65,7 +65,7 @@ define是纯替换，const是常量声明（指针或者普通值），后面不
 
 # C++编译过程
 :avocado: 
-***:love: 静态链接库和动态链接库***
+***:heart: 静态链接库和动态链接库***
 1. 静态链接库（ Static Link Linbrary)
 假设你有一个数学库 math.a，里面包含 add() 和 sub() 函数。
 
@@ -90,6 +90,85 @@ define是纯替换，const是常量声明（指针或者普通值），后面不
 
 结果：如果你的电脑里没有 math.so，双击 main.exe 会报错：“找不到 .dll/.so 文件”
 
+# C++面向对象特性：继承&多态
+## 继承
+   子类会继承到基类的部分特性，继承方式如下：
+   
+   public：外部可调用。
+
+   private：基类的“小秘密”，子类不可见。
+
+   protected：专门为继承设计的。外人看不见，但自家（子类）可以随便用
+   
+   继承最强大的地方在于***代码复用***。
+## 多态
+   本质：接口与实现分离。基类定义了一个接口，而子类提供这个接口针对不同的子类有不同的实现。
+
+   解耦：代码不再依赖于具体的类，而是依赖于抽象的基类。增加新子类时，原有代码（如 main 函数逻辑）不需要修改
+
+   动态绑定（针对运行期多态）：通过虚函数表（vtable），程序在运行时才决定调用哪个函数，而不是编译时
+### 重载(Overload)
+      在同一个作用域内，函数名相同但参数个数、类型或顺序不同
+```
+   class Calculator {
+public:
+    int add(int a, int b) { return a + b; }
+    // 重载：函数名相同，参数类型不同
+    double add(double a, double b) { return a + b; } 
+};
+```
+### 重写(Override)
+    派生类重新定义基类中被声明为 virtual 的函数。这是实现动态多态的基础。其中在基类中被定义为纯虚函数的函数在子类中必须被重写。
+```
+class Animal {
+public:
+    virtual void speak() { std::cout << "未知叫声" << std::endl; }
+};
+
+class Dog : public Animal {
+public:
+    // 重写：基类是 virtual，函数签名完全一致
+    void speak() override { std::cout << "汪汪！" << std::endl; } 
+};
+```
+### 隐藏(Hide)
+    当子类定义了与父类同名但不符合重写条件的函数时，父类的函数会被“遮住”，子类调用的时候只能用子类写的那个看不到父类那个了。
+```
+class Base {
+public:
+    void fun(int a) { std::cout << "Base fun" << std::endl; }
+};
+
+class Derived : public Base {
+public:
+    // 隐藏：函数名相同，但参数不同，或者基类函数没有 virtual
+    // 此时 Base 里的 fun(int) 在 Derived 作用域内被屏蔽了
+    void fun(std::string s) { std::cout << "Derived fun" << std::endl; }
+};
+
+// 使用时：
+Derived d;
+d.fun("hello"); // 正确
+// d.fun(10);   // 错误！编译器找不到 fun(int)，因为它被 fun(string) 隐藏了
+```
+
+
+    
+
+   
+   
+   
+
+
+
+
+
+
+
+
+
+
+## 多态
 
 
   
