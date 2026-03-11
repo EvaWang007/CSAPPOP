@@ -12,7 +12,7 @@
   方法 B（专业办法）：在 vars.h 里写一次 extern int global_count;，然后在 10 个 .cpp 里直接 #include "vars.h"。
 
    好处：一处修改，全局同步。这体现了编程中的 DRY (Don't Repeat Yourself) 原则
-## struct class
+## struct class union
    前者默认public继承，后者默认private继承
 ```
    struct HeroStruct {
@@ -47,5 +47,6 @@ HeroClass c;
 // c.name = "李白"; // 错误！编译报错，因为 name 是私有的
 c.setName("李白");   // 正确，通过公开接口访问
 ```
+而union是所有成员完全重叠，起始地址相同，每次只能存一个值，sizeof(union)是最大的的一个成员变量的大小
   
    
