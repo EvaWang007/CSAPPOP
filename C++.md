@@ -64,7 +64,7 @@ define是纯替换，const是常量声明（指针或者普通值），后面不
 
 
 # C++编译过程
-:process: 
+:avocado: 
 ***:love: 静态链接库和动态链接库***
 1. 静态链接库（ Static Link Linbrary)
 假设你有一个数学库 math.a，里面包含 add() 和 sub() 函数。
