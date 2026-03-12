@@ -217,7 +217,7 @@ public:
 比如这个Dog类和Cat类都继承自Animal基类
 <img width="1548" height="466" alt="image" src="https://github.com/user-attachments/assets/3483df5e-e12a-45b9-bb84-a896c383eb4f" />
 
-煮一个:nut:
+煮一个:nut:：
 当你写 Animal* p = new Dog(); 通过Dog类实例化一个Dog对象时，发生了什么？
 
 对象里藏了线索：在内存中，new Dog() 创建出的那个对象块，头部存着一个指针（vptr）。
@@ -229,6 +229,40 @@ public:
 精准打击：既然 vptr 指向的是 Dog 的表，查表得到的自然就是 &Dog::speak。
 
 这就是为什么同一个 Animal* 指针，指着猫就查猫的表，指着狗就查狗的表。如果没有重写，就会被带回到父类:arrow:处。
+
+刚才我们讨论的是单继承的情况，就是这个子类只继承于一个基类；现在我们讨论多继承的情况，一个子类继承于好几个基类比如：class Derived : public Base1, public Base2
+
+子类对象会按照继承顺序，在内存中依次排列 Base1 的部分和 Base2 的部分。具体示例如下：假设Base1里面有函数f1被子类Derived重写，除此之外子类新增一个f3，Base2里面有一个f2被重写：
+```
+此时 Derived 对象的内部长这样：
+
+vptr1 (指向 Derived 的第一张虚表)
+
+[0]: &Derived::f1 (重写了 Base1)
+
+[1]: &Derived::f3 (子类新增的，挂在第一张表后面)
+
+Base1 的成员变量
+
+vptr2 (指向 Derived 的第二张虚表)
+
+[0]: &Derived::f2 (重写了 Base2)
+
+Base2 的成员变量
+
+Derived 自己的成员变量
+
+```
+:attention:C++ 必须保证：当你把子类指针强制转换为任何一个父类指针时，该指针指向的内存布局都必须符合那个父类的预期
+
+
+
+
+
+
+
+
+
 
 
 
