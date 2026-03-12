@@ -152,6 +152,45 @@ d.fun("hello"); // 正确
 // d.fun(10);   // 错误！编译器找不到 fun(int)，因为它被 fun(string) 隐藏了
 ```
 
+## C++语言特性
+### 左值和右值
+:banana:左值：指表达式结束后依然存在的持久对象。
+
+:apple: 右值：表达式结束就不再存在的临时对象。
+
+以下用比较直观的例子介绍使用效果：
+首先是一个一般的左值引用（引用拷贝）
+```
+class MyString {
+    char* data;
+public:
+    // 拷贝构造函数：参数是左值引用 (const MyString& )
+    MyString(const MyString& other) {
+        // 1. 看到别人有数据，我也先申请一块同样大的内存
+        data = new char[strlen(other.data) + 1];
+        // 2. 一个字符一个字符地复制过去
+        strcpy(data, other.data);
+        std::cout << "执行了深拷贝，好累啊！\n";
+    }
+};
+```
+如果那个“旧对象”是一个临时对象（右值），比如一个函数返回的临时结果。它马上就要被销毁了。既然它要死了，我们为什么还要辛苦复制呢？
+直接把它的内存地址抢过来不就行了？所以接下来使用右值引用：
+```
+class MyString {
+    char* data;
+public:
+    // 移动构造函数：参数是右值引用 (MyString&& )
+    MyString(MyString&& other) {
+        // 1. 直接把你的内存地址给我，我不申请新空间了
+        this->data = other.data;
+        // 2. 把你的指针抹掉（置空），防止你自杀（析构）时把我的数据带走
+        other.data = nullptr; 
+        std::cout << "执行了移动语义，直接抢了指针，真快！\n";
+    }
+};
+```
+
 
     
 
