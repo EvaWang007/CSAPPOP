@@ -253,6 +253,8 @@ Base2 的成员变量
 Derived 自己的成员变量
 
 ```
+<img width="827" height="269" alt="image" src="https://github.com/user-attachments/assets/33b4da8c-5bc2-4e80-b0cc-9e656c1dd550" />
+
 :attention:C++ 必须保证：当你把子类指针强制转换为任何一个父类指针时，该指针指向的内存布局都必须符合那个父类的预期
 
 
