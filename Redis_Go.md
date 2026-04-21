@@ -373,14 +373,17 @@ func main() {
 ```
 
 # Redis 分布式锁+发布/订阅 => 并发竞争☄️数据安全⚖️
-🥇分布式锁：
+
+🥇**分布式锁**：
+
 多个操作同时进行的时候，每个操作都获取一个自己独特的Value，然后执行SetNX机制（即有锁就失败，没有锁就把自己的锁往里放。
 
 注意这里锁的名字是统一的，但是每个操作都有自己独特的Value值，这个值去抢同一个锁），保证操作的时候不会“打架”；
 
 当操作完之后实行Lua脚本，保证***是谁放的Value谁才能删***保证即使任务超时锁过期了操作依然不会被篡改
 
-🥈发布/订阅：
+🥈**发布/订阅**：
+
 以下面这个机器人代码为例子：
 ```
 package main
@@ -460,6 +463,341 @@ func main() {
 阻塞性：在 Go 里，如果管道满了或没准备好，发送动作会卡住。这是一种强大的“流量控制”手段。
 
 主要目的：实现单一程序内部的并发安全通信
+
+***In Conclusion⚗️***
+
+***不要通过共享内存来通信，而要通过通信来共享内存***。使用 chan 类型让你能用 range 循环优雅地处理消息。
+
+异步缓冲：go-redis 在后台帮你维护了一个缓冲区。当 Redis 的消息像潮水一样涌来时，它先存在 Go Channel 里，让你的处理逻辑慢慢消化。
+
+
+🧠 ***Puts them together!!! Volia~~🔥***
+```
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	"time"
+)
+
+var ctx = context.Background()
+
+func main() {
+	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+	
+	taskLockKey := "underwater:pipe:repair:lock"
+	statusChannel := "underwater:task:broadcast"
+	myID := "Robot-Eva-007"
+
+	// --- 1. 订阅者：其他机器人或控制中心在听广播 ---
+	go func() {
+		pubsub := rdb.Subscribe(ctx, statusChannel)
+		ch := pubsub.Channel()
+		for msg := range ch {
+			fmt.Printf("📡 [基地收到广播]: %s\n", msg.Payload)
+		}
+	}()
+
+	// --- 2. 分布式锁：尝试获取维修权 ---
+	// 抢地盘、贴封条
+	lockValue := uuid.New().String()//随机生成的ID，每个进程特有
+	success, _ := rdb.SetNX(ctx, taskLockKey, lockValue, 10*time.Second).Result()
+
+	if success {
+		fmt.Printf("✅ %s: 抢锁成功！进入维修区域。\n", myID)
+
+		// --- 3. 发布/订阅：维修过程中不断发报 ---
+		for i := 20; i <= 100; i += 40 {
+			time.Sleep(1 * time.Second)
+			message := fmt.Sprintf("🤖 %s 正在维修中，进度：%d%%", myID, i)
+			
+			// 通过频道告诉所有人进度
+			rdb.Publish(ctx, statusChannel, message)
+		}
+
+		// --- 4. 释放锁：维修结束，认准身份证 ---
+		luaRelease := `
+			if redis.call("get", KEYS[1]) == ARGV[1] then
+				return redis.call("del", KEYS[1])
+			else
+				return 0
+			end
+		`
+		rdb.Eval(ctx, luaRelease, []string{taskLockKey}, lockValue)
+		fmt.Printf("🔓 %s: 维修完成，撤离并释放锁。\n", myID)
+		rdb.Publish(ctx, statusChannel, "📢 维修区域已空出，下一台请进。")
+
+	} else {
+		fmt.Printf("❌ %s: 抢锁失败，维修区已有机器人，原地待命。\n", myID)
+	}
+
+	time.Sleep(2 * time.Second) // 等待广播发完
+}
+```
+
+原则1：***先***准备好订阅端，***后***准备好发布端
+
+原则2：进入对数据库的实际操作/发布操作之前要先抢锁
+
+原则3：每个操作都有自己独特的lockValue,它们试图被塞进同一个锁taskLockKey，锁是一样的，一次只能有一把钥匙lockValue插上***(SetNX)***
+
+********************************************************************************************
+
+在刚才的发布for代码（实际的机器人操作）前面加一个锁限制，只有塞锁操作SetNX成功才能进入发布for流程发布消息；
+
+同时在for代码结束之后加Lua机制，保证上锁和解锁的是一个ID否则继续等待这个锁的释放；
+
+这个机制可以防止多个机器人进入发布流程导致redis的操作混乱
+
+
+以下是一个抢仓库的资源代码
+```
+mport (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/rand"
+	"sync"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// -------------------- 分布式锁 --------------------
+
+type DistributedLock struct {
+	rdb   *redis.Client
+	key   string
+	value string        // 锁的持有者标识（唯一值）
+	ttl   time.Duration // 锁自动过期时间
+}
+
+func NewDistributedLock(rdb *redis.Client, key string, ttl time.Duration) *DistributedLock {
+	return &DistributedLock{
+		rdb:   rdb,
+		key:   key,
+		value: fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int63()),
+		ttl:   ttl,
+	}
+}
+
+// Acquire: SET key value NX PX ttl
+// NX=仅当key不存在时设置；PX=毫秒级过期
+func (l *DistributedLock) Acquire(ctx context.Context) (bool, error) {
+	return l.rdb.SetNX(ctx, l.key, l.value, l.ttl).Result()
+}
+
+// 用 Lua 做“比较后删除”
+// 只有 value 一致（自己加的锁）才允许删，避免误删别人的锁
+var unlockScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+else
+  return 0
+end
+`)
+
+func (l *DistributedLock) Release(ctx context.Context) (bool, error) {
+	n, err := unlockScript.Run(ctx, l.rdb, []string{l.key}, l.value).Int()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func (l *DistributedLock) WithLock(
+	ctx context.Context,
+	maxRetry int,
+	retryInterval time.Duration,
+	fn func() error,
+) error {
+	for i := 0; i < maxRetry; i++ {
+		ok, err := l.Acquire(ctx)
+		if err != nil {
+			return err
+		}
+		if ok {
+			defer l.Release(ctx)
+			return fn()
+		}
+		time.Sleep(retryInterval)
+	}
+	return errors.New("acquire lock timeout")
+}
+
+// -------------------- 发布订阅 --------------------
+
+func startSubscriber(ctx context.Context, rdb *redis.Client, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		pubsub := rdb.Subscribe(ctx, "order_events")
+		defer pubsub.Close()
+
+		// 等待订阅建立
+		if _, err := pubsub.Receive(ctx); err != nil {
+			fmt.Println("[SUB] 订阅失败:", err)
+			return
+		}
+
+		ch := pubsub.Channel()
+		for {
+			select {
+			case msg := <-ch:
+				if msg == nil {
+					return
+				}
+				fmt.Println("[SUB] 收到事件:", msg.Payload)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// -------------------- 业务：并发抢库存 --------------------
+
+func buyOnce(ctx context.Context, rdb *redis.Client, workerID int) error {
+	lock := NewDistributedLock(rdb, "lock:stock:item:1001", 3*time.Second)
+
+	return lock.WithLock(ctx, 40, 80*time.Millisecond, func() error {
+		stock, err := rdb.Get(ctx, "stock:item:1001").Int()
+		if err == redis.Nil {
+			return errors.New("库存key不存在")
+		}
+		if err != nil {
+			return err
+		}
+
+		if stock <= 0 {
+			fmt.Printf("[worker-%d] 库存不足，抢购失败\n", workerID)
+			return nil
+		}
+
+		newStock, err := rdb.Decr(ctx, "stock:item:1001").Result()
+		if err != nil {
+			return err
+		}
+
+		event := map[string]interface{}{
+			"worker_id":  workerID,
+			"action":     "buy_success",
+			"left_stock": newStock,
+			"time":       time.Now().Format(time.RFC3339),
+		}
+		b, _ := json.Marshal(event)
+
+		if err := rdb.Publish(ctx, "order_events", b).Err(); err != nil {
+			return err
+		}
+
+		fmt.Printf("[worker-%d] 抢购成功，剩余库存=%d\n", workerID, newStock)
+		return nil
+	})
+}
+
+func main() {
+	rand.Seed(time.Now().UnixNano())
+	ctx := context.Background()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: "localhost:6379",
+		DB:   0,
+	})
+	defer rdb.Close()
+
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		panic("Redis 连接失败: " + err.Error())
+	}
+
+	// 初始化库存=5
+	if err := rdb.Set(ctx, "stock:item:1001", 5, 0).Err(); err != nil {
+		panic(err)
+	}
+
+	// 启动订阅者
+	subCtx, cancelSub := context.WithCancel(ctx)
+	var subWG sync.WaitGroup
+	startSubscriber(subCtx, rdb, &subWG)
+	time.Sleep(200 * time.Millisecond) // 给订阅建立一点时间
+
+	// 10个并发worker抢购
+	var wg sync.WaitGroup
+	for i := 1; i <= 10; i++ {
+		wg.Add(1)
+		workerID := i
+		go func() {
+			defer wg.Done()
+			if err := buyOnce(ctx, rdb, workerID); err != nil {
+				fmt.Printf("[worker-%d] 执行失败: %v\n", workerID, err)
+			}
+		}()
+	}
+
+	wg.Wait()
+	time.Sleep(300 * time.Millisecond) // 等订阅消息打印完
+	cancelSub()
+	subWG.Wait()
+
+	finalStock, _ := rdb.Get(ctx, "stock:item:1001").Int()
+	fmt.Println("最终库存:", finalStock)
+}
+```
+
+解析：
+
+1. 程序启动与 Redis 连接  
+在 [`main.go:526`](/home/evawang/code/go_redis/main.go:526) 到 [`main.go:538`](/home/evawang/code/go_redis/main.go:538)：  
+创建 `rdb`，`Ping` 检查 Redis 可用，不可用就直接 `panic`。
+
+2. 初始化共享资源（库存）  
+在 [`main.go:540`](/home/evawang/code/go_redis/main.go:540) 到 [`main.go:543`](/home/evawang/code/go_redis/main.go:543)：  
+把 `stock:item:1001` 设置为 `5`，表示总库存 5。
+
+3. 启动订阅端（消息接收方）  
+在 [`main.go:546`](/home/evawang/code/go_redis/main.go:546) 到 [`main.go:549`](/home/evawang/code/go_redis/main.go:549)，调用 [`startSubscriber`](/home/evawang/code/go_redis/main.go:456)：  
+开启 goroutine 订阅 `order_events`。  
+之后任何 `Publish("order_events", ...)` 的消息都会在这里打印出来。
+
+4. 启动 10 个并发 worker 抢购  
+在 [`main.go:551`](/home/evawang/code/go_redis/main.go:551) 到 [`main.go:562`](/home/evawang/code/go_redis/main.go:562)：  
+每个 worker 都执行 [`buyOnce`](/home/evawang/code/go_redis/main.go:487)。
+
+5. 每个 worker 先抢“同一把锁”  
+在 [`main.go:488`](/home/evawang/code/go_redis/main.go:488) 和 [`main.go:490`](/home/evawang/code/go_redis/main.go:490)：  
+锁 key 固定是 `lock:stock:item:1001`，所以大家竞争的是同一临界区。  
+`NewDistributedLock` 会给每个 worker 生成唯一 `value`（持有者标识）[`main.go:405`](/home/evawang/code/go_redis/main.go:405)。  
+`WithLock` 内部重试抢锁（最多 40 次，每次间隔 80ms）[`main.go:434`](/home/evawang/code/go_redis/main.go:434)。
+
+6. 抢到锁后才进入扣库存逻辑  
+在 [`main.go:491`](/home/evawang/code/go_redis/main.go:491) 到 [`main.go:507`](/home/evawang/code/go_redis/main.go:507)：  
+先读库存，`stock<=0` 就失败返回；否则 `DECR` 扣减 1。  
+因为有锁保护，避免了并发下“同时读到同一库存”导致超卖。
+
+7. 扣减成功后发布事件给订阅端  
+在 [`main.go:509`](/home/evawang/code/go_redis/main.go:509) 到 [`main.go:519`](/home/evawang/code/go_redis/main.go:519)：  
+组装 JSON 事件，`Publish` 到 `order_events`。  
+订阅协程会收到并打印（见第 3 步）。
+
+8. 业务函数结束时释放锁（安全释放）  
+在 [`main.go:446`](/home/evawang/code/go_redis/main.go:446) 会 `defer l.Release(ctx)`。  
+`Release` 用 Lua 校验“锁里的 value 是不是我自己的”，是才删锁 [`main.go:418`](/home/evawang/code/go_redis/main.go:418) 到 [`main.go:432`](/home/evawang/code/go_redis/main.go:432)。  
+这是防止误删别人锁的关键。
+
+9. 主流程收尾  
+在 [`main.go:564`](/home/evawang/code/go_redis/main.go:564) 到 [`main.go:570`](/home/evawang/code/go_redis/main.go:570)：  
+等待所有 worker 结束，关闭订阅，最后读取并打印最终库存。
+
+你可以把整个业务抽象成一句话：  
+“多个并发请求先竞争同一把 Redis 分布式锁，抢到锁的请求才能安全扣库存；扣减成功后通过 Pub/Sub 广播事件给监听方，实现并发安全 + 异步通知。”
+
+
+
 
 
 
