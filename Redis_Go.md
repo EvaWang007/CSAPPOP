@@ -138,9 +138,9 @@
 }
 ```
 
-# Redis缓存+DateBase读数据机制
+# Redis 缓存 + DateBase读数据机制 => 数据读写的原子性和一致性
 
-***🥑先查 Redis（缓存），没命中再查 fakeDB（模拟数据库）***
+***🥑先查 Redis（缓存），没命中再查 fakeDB（模拟数据库），***
 
 
 先读redis里面的
@@ -371,6 +371,100 @@ func main() {
 	fmt.Println("top rank:", top)
 }
 ```
+
+# Redis 分布式锁+发布/订阅 => 并发竞争☄️数据安全⚖️
+🥇分布式锁：
+多个操作同时进行的时候，每个操作都获取一个自己独特的Value，然后执行SetNX机制（即有锁就失败，没有锁就把自己的锁往里放。
+
+注意这里锁的名字是统一的，但是每个操作都有自己独特的Value值，这个值去抢同一个锁），保证操作的时候不会“打架”；
+
+当操作完之后实行Lua脚本，保证***是谁放的Value谁才能删***保证即使任务超时锁过期了操作依然不会被篡改
+
+🥈发布/订阅：
+以下面这个机器人代码为例子：
+```
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/redis/go-redis/v9"
+	"time"
+)
+
+var ctx = context.Background()
+
+func main() {
+	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+
+	// 定义频道名称
+	const droneChannel = "drone:status:updates"
+
+	// 1. 【订阅者逻辑】启动一个后台协程来听消息
+	go func() {
+		pubsub := rdb.Subscribe(ctx, droneChannel)
+		defer pubsub.Close()
+
+		fmt.Println("🛰️  监控系统已上线，正在监听状态...")
+
+		// 用管道（Channel）的方式接收消息
+		ch := pubsub.Channel()
+		for msg := range ch {
+			fmt.Printf("📬 【收到广播】来自频道 [%s]: %s\n", msg.Channel, msg.Payload)
+		}
+	}()
+
+	// 稍微等一下，确保订阅者已经准备好
+	time.Sleep(time.Millisecond * 500)
+
+	// 2. 【发布者逻辑】在主线程发送消息
+	fmt.Println("🚀 传感器检测到异常，准备广播...")
+	
+	messages := []string{
+		"警告：水深超过 500 米",
+		"状态：推进器转速异常",
+		"指令：立即上浮",
+	}
+
+	for _, m := range messages {
+		// 向频道发送消息
+		err := rdb.Publish(ctx, droneChannel, m).Err()
+		if err != nil {
+			fmt.Println("广播失败:", err)
+		}
+		time.Sleep(time.Second) // 每秒发一条
+	}
+}
+```
+
+这个订阅者协程pubsub负责监听该订阅者的消息，这个消息的路径来源是droneChannel，这个管道链接了订阅者和发布者；
+
+发布者其实是最后的for函数，负责遍历message中的内容并送入管道droneChannel；
+
+最后这个pubsub使用go内部的channel管道收到的消息printf出去；
+
+🐷tell the difference:
+
+***Redis Channel：像“电台广播”***
+
+机制：它是解耦的。发布者只管往 Redis 里的某个 Key（频道名）扔消息，它根本不知道谁在听。
+
+连接性：订阅者必须保持长连接。如果网络断了，断开期间的消息就永远错过了。
+
+主要目的：实现分布式系统之间的消息同步。
+
+***Go Channel：像“接力棒”***
+
+机制：它是为了解决 Goroutine（协程） 之间的同步。
+
+阻塞性：在 Go 里，如果管道满了或没准备好，发送动作会卡住。这是一种强大的“流量控制”手段。
+
+主要目的：实现单一程序内部的并发安全通信
+
+
+
+
+
 
 
 
