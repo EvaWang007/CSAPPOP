@@ -1,4 +1,72 @@
+可以，这个方向非常适合写 AI Agent 岗位简历。基于你这个工程（`/home/evawang/Downloads/rosa-main`）和我查到的岗位信息，我给你一版可直接用的亮点表述。
+
+**岗位关键词（你要对齐的能力）**
+- 字节（AI Agent研发实习生-开发者服务，2025-02-06）：强调 `记忆模块`、`规划模块`、`工具调用`、`外部系统/API集成`、`知识库检索`。
+- 腾讯（智能体开发平台-AI后台工程师，2026-03-11）：强调 `LLM Agent工程架构`、`RAG/工作流编排`、`后台架构稳定性`、`分布式与高可用`。
+- 阿里云（大模型应用开发工程师实习，投递窗口 2026-03-20 至 2026-06-30）：强调 `Agent框架`、`多步推理/工具调用/记忆管理/多智能体`、`LLMOps评测监控`、`MCP生态`。
+
+**你这个项目可写的简历亮点（可直接复制）**
+- 基于 LangChain 搭建 ROS 智能体执行框架，完成 `tool-calling agent + AgentExecutor` 主链路，实现自然语言到机器人操作的闭环。  
+- 设计并实现 Agent 记忆与执行中间态机制，支持 `chat_history + scratchpad`，提升多轮任务连续性与工具调用稳定性。  
+- 构建可扩展工具体系：支持默认工具、动态工具包注入与 ROS1/ROS2 分版本装配，降低新场景接入成本。  
+- 实现工具安全约束机制（blacklist 自动注入），避免模型遗漏约束导致的越权调用，提升智能体可控性。  
+- 落地 ROS2 实时控制工具链，封装 topic/service 调用、超时控制、边界校验与姿态回读，实现可执行的机器人动作控制。  
+- 支持流式事件输出，暴露 `token/tool_start/tool_end/final` 事件，便于前端交互与可观测性建设。  
+- 打通工程化运行链路：`conda + colcon + ROS workspace + turtlesim` 一键启动脚本，支持本地快速复现实验。  
+- 建立测试体系，覆盖 ROS2 工具调用、异常分支、系统工具等核心模块（测试函数约 127 个），提升迭代可靠性。
+
+**更“面试官友好”的项目一句话**
+- 基于 ROSA 二次开发了一个面向机器人场景的 AI Agent：具备工具调用、记忆、流式交互、ROS2 执行与测试保障能力，可将自然语言任务转为可控的机器人动作执行。
+
+**代码证据（你可在面试时指给面试官）**
+- Agent 主框架：[rosa.py](/home/evawang/Downloads/rosa-main/src/rosa/rosa.py)
+- 工具装配与 blacklist 注入：[tools/__init__.py](/home/evawang/Downloads/rosa-main/src/rosa/tools/__init__.py)
+- ROS2 工具执行层：[ros2.py](/home/evawang/Downloads/rosa-main/src/rosa/tools/ros2.py)
+- TurtleSim 扩展工具包：[turtle_ros2.py](/home/evawang/Downloads/rosa-main/ros2_ws/src/turtle_agent_ros2/turtle_agent_ros2/tool/turtle_ros2.py)
+- 工程启动脚本：[run_agent_ros2.sh](/home/evawang/Downloads/rosa-main/run_agent_ros2.sh)
+- 测试样例：[test_ros2.py](/home/evawang/Downloads/rosa-main/tests/test_rosa/tools/test_ros2.py)
+
+**调研来源**
+- 字节（AI Agent研发实习生-开发者服务）: https://www.mianshima.com/job/2/7468221645670074632  
+- 腾讯（智能体开发平台-AI后台工程师）: https://jobs.niuqizp.com/job-vmY5LCtaM.html  
+- 腾讯云 ADP（官方能力说明）: https://adp.cloud.tencent.com/  
+- 阿里云（大模型应用开发工程师实习）: https://www.nowcoder.com/jobs/detail/440351?urlSource=sitemap  
+
+如果你愿意，我下一步可以按“校招版/社招版”各给你 1 段完整项目经历（含技术栈、职责、结果、关键词），直接贴进简历。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 非常好，你这个能力组合其实很有竞争力。下面给你一版可以直接用于校招简历的“详细项目经历叙述”，并把你提到的 `C++多线程并发`、`Git`、`Go/Redis` 能力自然融合进去。
+
+
+
+
+
+
+
+
+
 
 **项目经历（详细版）**  
 `ROSA-MAIN：面向 ROS2 的 AI Agent 机器人控制与诊断系统`  
