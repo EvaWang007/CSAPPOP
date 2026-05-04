@@ -1,6 +1,6 @@
 # Redis 五大数据存储结构 => String    Hashmap   Set   zSet   List
 ```
-//**************1. Sring 操作****************
+//**************1. String 操作****************
 	// SET key value EX 10s (设置10秒过期)
 	err := rdb.Set(ctx, "user:name", "EvaWang", 10*time.Second).Err()
 	if err != nil {
