@@ -153,6 +153,31 @@ LLM 不是凭空回答，而是在 prompt 里拿到检索上下文后生成回�
 5. Vector store 解决“如何快速找相似内容”。  
 6. LLM 解决“如何基于检索内容生成自然语言回答”。  
 
-面试可以这样一句话总结：
 
-“这个项目不是直接调一个 RAG 框架，而是把 RAG 从 loader、chunk、embedding、向量检索到 prompt 增强生成都手动拆开实现。文本进入系统后先被 loader 统一成 Document，再被 splitter 切成 chunk，chunk 生成 embedding 后进入向量库。用户提问时，query 也被 embedding，系统检索 top-k 相关 chunk 拼进 prompt，最后由 LLM 基于上下文生成答案。”
+
+***In Conclusion🥑:***
+> 文本被 loader 载入成 Document，Document 包含正文 pageContent 和描述来源的 metadata。
+> 随后 splitter 把长文档切成带 metadata 的 chunk，再对 chunk 文本做 embedding 并存入向量库。
+> 用户提问时，问题也被转成向量，系统用向量相似度检索相关 chunk，再把这些 chunk 的正文（必要时附带 metadata，如页码和来源）拼进 prompt，交给 LLM 生成答案。
+>metadata 主要负责保留来源、页码、chunk 编号等信息，方便检索过滤和答案溯源。
+> 🔥metadata 让系统在检索出 chunk 后，知道这个 chunk 来自原文本的哪个部分；
+>如果把它写入 prompt，LLM 也能基于这些来源信息做引用
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
