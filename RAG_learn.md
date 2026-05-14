@@ -156,12 +156,56 @@ LLM 不是凭空回答，而是在 prompt 里拿到检索上下文后生成回�
 
 
 ***In Conclusion🥑:***
+***1.问答SOP***
+
 > 文本被 loader 载入成 Document，Document 包含正文 pageContent 和描述来源的 metadata。
 > 随后 splitter 把长文档切成带 metadata 的 chunk，再对 chunk 文本做 embedding 并存入向量库。
 > 用户提问时，问题也被转成向量，系统用向量相似度检索相关 chunk，再把这些 chunk 的正文（必要时附带 metadata，如页码和来源）拼进 prompt，交给 LLM 生成答案。
 >metadata 主要负责保留来源、页码、chunk 编号等信息，方便检索过滤和答案溯源。
 > 🔥metadata 让系统在检索出 chunk 后，知道这个 chunk 来自原文本的哪个部分；
 >如果把它写入 prompt，LLM 也能基于这些来源信息做引用
+
+
+***2.文本切块和Metadata提取策略
+
+一、文档与 metadata 从哪来
+
+1. **Loader 读入**（如 `PDFLoader.load()`）把 PDF 变成若干 `Document`：每个有 `pageContent`（正文）和 `metadata`（如 `source`、`pdf`、`page`、`loc.pageNumber` 等）。  
+2. **或手写** `new Document(正文, { id, topic, … })`，metadata 由你定义。  
+3. **`Document` 类**只负责把 `pageContent` 和 `metadata` 两个字段存在一起，不做语义分析。
+
+---
+
+二、切块入口与数据流
+
+4. 对 `Document[]` 调用 **`splitDocuments`**：对每个文档取 `pageContent` 与 `metadata`，交给 **`createDocuments([text], [metadata])`**。  
+5. **`createDocuments`** 用子类实现的 **`splitText(text)`** 把字符串切成多段字符串。  
+6. 对每一段字符串 **`new Document(块正文, { ...原metadata, chunk: j, totalChunks: N })`**：  
+   - **`...原metadata`**：整块继承父文档的 metadata（来源、页码等不变）。  
+   - **`chunk` / `totalChunks`**：只表示「**当前父文档**被切成第几块、共几块」（换父文档后 `chunk` 会重新从 0 计数）。
+
+---
+
+三、切块策略（与 metadata 无关的「怎么切」）
+
+7. **`CharacterTextSplitter`**：按**单一**分隔符（默认 `\n\n`）先 `split`，再用 **`mergeSplits`** 按 `chunkSize`、`chunkOverlap`、`lengthFunction` 合并小段，控制单块长度与重叠。  
+8. **`RecursiveCharacterTextSplitter`**：按 **`separators` 优先级**（默认 `\n\n` → `\n` → `. ` → ` ` → `''`）先选「能在文中找到的最靠前分隔符」切开；**仍超长**的子串用**更细**的分隔符列表**递归** `splitText`；合适长度的片段再交给 **`mergeSplits`**。  
+9. **`TokenTextSplitter`**：用「**字符数/4 上取整**」近似 token 作为 `lengthFunction`，内部仍用 **`RecursiveCharacterTextSplitter`** 做实际切分。
+
+---
+
+四、metadata「策略」总结（不叫「提取」更准确）
+
+10. **生成时机**：主要在 **载入/创建 `Document` 时**写入；**切块器不解析正文去「提取」**新 metadata。  
+11. **切块阶段**：**只复制并追加**——复制父级 metadata，**追加** `chunk`、`totalChunks`。  
+12. **入库阶段**（示例代码常见写法）：在 metadata 里**再并入** `content`（正文副本）和向量一起存，便于检索后直接取文本；**向量本身仍由 `pageContent` 嵌入得到**。  
+13. **给 LLM**：默认只把拼进 prompt 的**字符串**（如正文）给模型；**metadata 对象不自动进模型**；若要让模型知道出处，需在 prompt 里**手写**来源/页码等（由 metadata 提供值）。
+
+---
+
+五、一句话串联
+
+**加载（或创建）时挂上 metadata → 切块时继承父 metadata 并加上块序号 → 嵌入用正文 → 入库常把正文副本与 metadata 和向量绑在一起 → 检索与回溯靠 metadata，进 LLM 的主要是你拼好的正文与指令。**
 
 
 
