@@ -1054,3 +1054,394 @@ age=20 -> 书号 id=3
 # 16. 一句话总结
 
 **InnoDB 的索引结构核心是：主键索引的叶子节点存完整行，二级索引的叶子节点存索引列和主键值；所以按主键查询可以直接拿到数据，按普通索引查询完整行通常需要先查二级索引，再通过主键回到聚簇索引查完整行，这就是回表。**
+
+
+对，你的理解已经非常接近了，但需要把一句话修正得更严谨：
+
+> **无论是聚簇索引还是二级索引，它们的非叶子节点存储的都是“索引键 + 子页指针”；叶子节点本身就是一个个 Page，这些 Page 里面存放多条记录。区别在于：聚簇索引叶子 Page 里存完整行数据；二级索引叶子 Page 里存二级索引列 + 主键值。**
+
+你刚才说的“叶子节点存储的是 Page 里面包含一段在这个索引下方的数据记录”，方向对，但更准确地说应该是：
+
+```text
+B+Tree 的叶子节点 ≈ 一个 InnoDB Page
+Page 里面包含多条记录
+```
+
+不是“叶子节点里面再存一个 Page”，而是：
+
+```text
+叶子节点本身就是由 Page 承载的。
+```
+
+---
+
+## 物理存储结构
+### 1. 聚簇索引的结构
+
+假设表是：
+
+```sql
+CREATE TABLE user (
+    id BIGINT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT,
+    city VARCHAR(50),
+    INDEX idx_name(name)
+) ENGINE=InnoDB;
+```
+
+数据：
+
+```text
+id    name     age    city
+1     Alice    18     Paris
+2     Bob      20     London
+3     Cindy    22     Berlin
+4     David    25     Paris
+5     Eva      30     Rome
+```
+
+聚簇索引是 `PRIMARY(id)`。
+
+它的逻辑结构可以理解为：
+
+```text
+PRIMARY(id) B+Tree
+
+                  根 Page
+              [id=3] -> 子页指针
+             /                \
+            /                  \
+  叶子 Page 100              叶子 Page 101
+  id=1 完整行                id=3 完整行
+  id=2 完整行                id=4 完整行
+                             id=5 完整行
+```
+
+更具体地说：
+
+```text
+聚簇索引非叶子 Page：
+
+Page 1
+--------------------------------
+key: id=3  -> child_page=101
+--------------------------------
+```
+
+聚簇索引叶子 Page：
+
+```text
+Page 100
+------------------------------------------------
+id=1, name=Alice, age=18, city=Paris
+id=2, name=Bob,   age=20, city=London
+------------------------------------------------
+
+Page 101
+------------------------------------------------
+id=3, name=Cindy, age=22, city=Berlin
+id=4, name=David, age=25, city=Paris
+id=5, name=Eva,   age=30, city=Rome
+------------------------------------------------
+```
+
+所以对于聚簇索引：
+
+```text
+非叶子节点：主键 id + 子页指针
+叶子节点：主键 id + 完整行数据
+```
+
+---
+
+### 2. 二级索引的结构
+
+现在看二级索引：
+
+```sql
+INDEX idx_name(name)
+```
+
+它也是一棵 B+Tree。
+
+但是它的内容不是完整行，而是：
+
+```text
+name + 主键 id
+```
+
+逻辑结构类似：
+
+```text
+idx_name(name) B+Tree
+
+                  根 Page
+            [name='Cindy'] -> 子页指针
+             /                         \
+            /                           \
+  叶子 Page 200                       叶子 Page 201
+  name=Alice, id=1                    name=Cindy, id=3
+  name=Bob,   id=2                    name=David, id=4
+                                      name=Eva,   id=5
+```
+
+更具体地说：
+
+```text
+二级索引非叶子 Page：
+
+Page 2
+-------------------------------------
+key: name='Cindy' -> child_page=201
+-------------------------------------
+```
+
+二级索引叶子 Page：
+
+```text
+Page 200
+--------------------
+name=Alice, id=1
+name=Bob,   id=2
+--------------------
+
+Page 201
+--------------------
+name=Cindy, id=3
+name=David, id=4
+name=Eva,   id=5
+--------------------
+```
+
+所以对于二级索引：
+
+```text
+非叶子节点：二级索引键 name + 子页指针
+叶子节点：二级索引键 name + 主键 id
+```
+
+如果是联合索引：
+
+```sql
+INDEX idx_name_age(name, age)
+```
+
+那么它的叶子 Page 存：
+
+```text
+name + age + 主键 id
+```
+
+非叶子 Page 也按照：
+
+```text
+name + age
+```
+
+来组织导航。
+
+---
+
+### 3. 非叶子节点到底存什么？
+
+你说“非叶子节点存储的都是索引，比如 id、name 等”，这句话基本对，但要补一个关键点：
+
+> **非叶子节点不只是存索引值，还要存“指向下一层 Page 的指针”。**
+
+否则它不知道下一步该去哪个 Page。
+
+所以非叶子节点更准确是：
+
+```text
+索引键 + 子页指针
+```
+
+例如聚簇索引：
+
+```text
+id=100 -> child_page=8
+id=300 -> child_page=9
+id=500 -> child_page=10
+```
+
+表示：
+
+```text
+小于 100 的去某个左侧页
+100 到 300 的去 child_page=8
+300 到 500 的去 child_page=9
+大于 500 的去 child_page=10
+```
+
+二级索引也是类似，只不过 key 换成了二级索引列。
+
+例如 `idx_name(name)`：
+
+```text
+name='Cindy' -> child_page=200
+name='Frank' -> child_page=201
+name='Tom'   -> child_page=202
+```
+
+---
+
+### 4. 叶子节点到底存什么？
+
+叶子节点，也就是叶子 Page，存的是一批有序记录。
+
+但是不同索引的叶子 Page 记录内容不同。
+
+***🥬聚簇索引叶子 Page***
+
+```text
+PRIMARY(id) 的叶子 Page 存完整行：
+
+id=1, name=Alice, age=18, city=Paris
+id=2, name=Bob,   age=20, city=London
+id=3, name=Cindy, age=22, city=Berlin
+```
+
+所以主键查找可以直接拿完整数据。
+
+---
+
+### 二级索引叶子 Page
+
+```text
+idx_name(name) 的叶子 Page 存：
+
+name=Alice, id=1
+name=Bob,   id=2
+name=Cindy, id=3
+```
+
+它不包含完整的 `age`、`city` 等字段。
+
+所以：
+
+```sql
+SELECT * FROM user WHERE name = 'Bob';
+```
+
+会先查二级索引：
+
+```text
+name=Bob -> id=2
+```
+
+然后回表：
+
+```text
+PRIMARY(id) -> id=2 -> 完整行
+```
+
+---
+
+### 5. 标准表述
+
+> **无论是聚簇索引还是二级索引，它们本质上都是 B+Tree。B+Tree 的非叶子 Page 存储“索引键 + 子页指针”，用于导航到下一层 Page；叶子 Page 存储真正的索引记录。对于聚簇索引，叶子 Page 中的记录就是完整行数据；对于二级索引，叶子 Page 中的记录是“二级索引列 + 主键值”，如果查询字段没有被覆盖，就需要根据主键值回到聚簇索引查完整行。**
+
+
+---
+
+### 6. 用一张对比表记住
+
+```text
+索引类型       非叶子 Page 存什么                  叶子 Page 存什么
+-----------------------------------------------------------------------
+聚簇索引       主键值 + 子页指针                    主键值 + 完整行数据
+
+二级索引       二级索引列 + 子页指针                二级索引列 + 主键值
+
+联合索引       联合索引列 + 子页指针                联合索引列 + 主键值
+```
+
+例如：
+
+```text
+PRIMARY(id)
+
+非叶子 Page:
+id -> child_page
+
+叶子 Page:
+id + name + age + city
+```
+
+```text
+idx_name(name)
+
+非叶子 Page:
+name -> child_page
+
+叶子 Page:
+name + id
+```
+
+```text
+idx_name_age(name, age)
+
+非叶子 Page:
+name + age -> child_page
+
+叶子 Page:
+name + age + id
+```
+
+---
+
+# 7. 最关键的区别
+
+你可以这样抓主线：
+
+```text
+所有索引都是 B+Tree。
+所有 B+Tree 都由 Page 组成。
+所有非叶子 Page 都负责导航。
+所有叶子 Page 都存实际索引记录。
+```
+
+但是：
+
+```text
+聚簇索引的叶子记录 = 完整行
+二级索引的叶子记录 = 索引列 + 主键
+```
+
+所以：
+
+```text
+按主键查：
+PRIMARY 非叶子 Page -> PRIMARY 叶子 Page -> 完整行
+
+按二级索引查：
+二级索引非叶子 Page -> 二级索引叶子 Page -> 主键值
+                                     |
+                                     v
+                           PRIMARY 非叶子 Page
+                                     |
+                                     v
+                           PRIMARY 叶子 Page -> 完整行
+```
+
+---
+
+### 8. 最后一句话总结
+
+**你的理解基本正确，只需要把“叶子节点存储的是 Page”改成“B+Tree 的叶子节点由 Page 承载，Page 里面存多条有序记录”。聚簇索引的叶子 Page 存完整行，二级索引和联合索引的叶子 Page 存索引列加主键值；非叶子 Page 存索引键加子页指针，用来导航到下一层 Page。**
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
