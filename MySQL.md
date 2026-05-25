@@ -273,6 +273,23 @@ id=3 -> id=3, name=Cindy, age=20, city=Berlin
 ```text
 回表
 ```
+***🐦TIPS:当查询需要的字段已经全部在二级索引里时，就不需要回表。***
+
+比如：
+
+SELECT id, age FROM user WHERE age = 20;
+
+idx_age(age) 的叶子节点里本来就有：
+
+age + id
+
+所以它可以直接返回：
+
+id    age
+2     20
+3     20
+
+不需要再去主键索引里查完整行。
 
 ---
 
