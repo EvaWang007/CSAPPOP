@@ -3898,7 +3898,1352 @@ RR：事务级快照
 RC：每次 SELECT 重新创建 Read View
 RR：事务内复用第一次 SELECT 的 Read View
 
-   
+
+
+
+## InnoDB锁机制下面我以 **MySQL InnoDB** 为主来讲 SQL 锁机制。因为你前面一直在学 InnoDB、MVCC、Read View，所以这里也按照 InnoDB 的真实执行逻辑来解释。
+
+你先记住一条主线：
+
+> **InnoDB 的普通 SELECT 通常不加锁，靠 MVCC 快照读；真正涉及锁的，主要是 UPDATE、DELETE、INSERT、SELECT ... FOR UPDATE、SELECT ... FOR SHARE 这些当前读或写操作。**
+
+---
+
+# 1. 先建立总框架：InnoDB 锁机制解决什么问题？
+
+数据库锁主要解决并发事务中的这些问题：
+
+```text
+1. 多个事务同时修改同一行，如何避免互相覆盖？
+2. 一个事务正在读并准备修改，另一个事务能不能改？
+3. 一个事务做范围查询，另一个事务能不能插入新行造成幻读？
+4. 一个事务正在操作表，另一个事务能不能修改表结构？
+```
+
+所以锁不是一个概念，而是一组机制。
+
+InnoDB 中常见锁可以分成几类：
+
+```text
+一、从读写关系看：
+    共享锁 S Lock
+    排他锁 X Lock
+
+二、从锁粒度看：
+    表级锁
+    行级锁
+
+三、从 InnoDB 内部索引锁看：
+    Record Lock 记录锁
+    Gap Lock 间隙锁
+    Next-Key Lock 临键锁
+    Insert Intention Lock 插入意向锁
+
+四、从表级协调看：
+    Intention Lock 意向锁
+    IS Lock 意向共享锁
+    IX Lock 意向排他锁
+
+五、特殊锁：
+    AUTO-INC Lock 自增锁
+    Metadata Lock 元数据锁，MDL
+```
+
+---
+
+# 2. 先区分快照读和当前读
+
+这是理解 InnoDB 锁的前提。
+
+## 2.1 快照读：普通 SELECT
+
+普通查询：
+
+```sql
+SELECT * FROM user WHERE id = 1;
+```
+
+在 InnoDB 中通常是**快照读**。
+
+它依赖：
+
+```text
+MVCC + Undo Log + Read View
+```
+
+它一般不会加行锁。
+
+比如：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1;
+```
+
+这条普通 SELECT 不会阻塞别人更新这行数据。它读的是当前事务可见的版本。
+
+---
+
+## 2.2 当前读：读取最新数据并加锁
+
+下面这些语句属于当前读或写操作：
+
+```sql
+SELECT * FROM user WHERE id = 1 FOR UPDATE;
+```
+
+```sql
+SELECT * FROM user WHERE id = 1 FOR SHARE;
+```
+
+```sql
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+```sql
+DELETE FROM user WHERE id = 1;
+```
+
+当前读的特点是：
+
+```text
+1. 读取当前最新的已提交数据
+2. 需要加锁
+3. 防止其他事务并发修改或插入影响结果
+```
+
+所以锁机制主要围绕当前读和写操作展开。
+
+---
+
+# 3. 共享锁 S Lock
+
+共享锁，也叫 **S Lock，Shared Lock**。
+
+它的含义是：
+
+> 当前事务可以读这行数据，其他事务也可以读，但不能修改。
+
+多个事务可以同时持有共享锁。
+
+---
+
+## 3.1 什么时候会加共享锁？
+
+在 MySQL 8.0 中，常见写法是：
+
+```sql
+SELECT * FROM user WHERE id = 1 FOR SHARE;
+```
+
+老版本中也可能看到：
+
+```sql
+SELECT * FROM user WHERE id = 1 LOCK IN SHARE MODE;
+```
+
+它表示：
+
+> 我要读取这行数据，并且在我的事务结束前，不希望别人修改它。
+
+---
+
+## 3.2 具体例子
+
+表：
+
+```sql
+CREATE TABLE user (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT
+) ENGINE=InnoDB;
+
+INSERT INTO user VALUES (1, 'Alice', 18);
+```
+
+事务 T1：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1 FOR SHARE;
+```
+
+T1 对 `id = 1` 这条记录加了共享锁。
+
+事务 T2 也可以读：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1 FOR SHARE;
+```
+
+T2 也能成功，因为共享锁和共享锁兼容。
+
+但是事务 T3 想修改：
+
+```sql
+BEGIN;
+
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+T3 会被阻塞。
+
+原因是：
+
+```text
+T1/T2 持有 S Lock
+T3 需要 X Lock
+S Lock 和 X Lock 不兼容
+```
+
+---
+
+# 4. 排他锁 X Lock
+
+排他锁，也叫 **X Lock，Exclusive Lock**。
+
+它的含义是：
+
+> 当前事务要修改这行数据，其他事务不能再对这行加共享锁或排他锁。
+
+排他锁非常强。
+
+---
+
+## 4.1 哪些操作会加排他锁？
+
+常见操作：
+
+```sql
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+```sql
+DELETE FROM user WHERE id = 1;
+```
+
+```sql
+SELECT * FROM user WHERE id = 1 FOR UPDATE;
+```
+
+这些都会对相关记录加 X Lock。
+
+---
+
+## 4.2 具体例子
+
+事务 T1：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1 FOR UPDATE;
+```
+
+这会对 `id = 1` 加排他锁。
+
+事务 T2：
+
+```sql
+BEGIN;
+
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+T2 会被阻塞。
+
+事务 T3：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1 FOR SHARE;
+```
+
+T3 也会被阻塞。
+
+但是事务 T4 做普通 SELECT：
+
+```sql
+SELECT * FROM user WHERE id = 1;
+```
+
+通常不会被阻塞，因为普通 SELECT 是快照读，走 MVCC，不需要等待这个 X Lock。
+
+所以要区分：
+
+```text
+普通 SELECT：快照读，通常不被行锁阻塞
+SELECT ... FOR UPDATE：当前读，需要加锁，会被阻塞
+UPDATE / DELETE：需要加锁，会被阻塞
+```
+
+---
+
+# 5. S Lock 和 X Lock 的兼容关系
+
+可以记这张表：
+
+```text
+已有锁 \ 请求锁      S Lock        X Lock
+-----------------------------------------
+S Lock              兼容          不兼容
+X Lock              不兼容        不兼容
+```
+
+也就是：
+
+```text
+共享锁之间可以共存
+只要涉及排他锁，就不能共存
+```
+
+---
+
+# 6. 表级锁 Table Lock
+
+表级锁是锁住整张表。
+
+MySQL 可以显式加表锁：
+
+```sql
+LOCK TABLES user READ;
+```
+
+或者：
+
+```sql
+LOCK TABLES user WRITE;
+```
+
+---
+
+## 6.1 READ 表锁
+
+```sql
+LOCK TABLES user READ;
+```
+
+含义：
+
+```text
+当前会话可以读 user 表
+其他会话也可以读 user 表
+但不能写 user 表
+```
+
+例子：
+
+会话 A：
+
+```sql
+LOCK TABLES user READ;
+
+SELECT * FROM user;
+```
+
+会话 B：
+
+```sql
+SELECT * FROM user;
+```
+
+可以执行。
+
+但会话 B：
+
+```sql
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+会被阻塞。
+
+---
+
+## 6.2 WRITE 表锁
+
+```sql
+LOCK TABLES user WRITE;
+```
+
+含义：
+
+```text
+当前会话可以读写 user 表
+其他会话不能读写 user 表
+```
+
+会话 A：
+
+```sql
+LOCK TABLES user WRITE;
+
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+会话 B：
+
+```sql
+SELECT * FROM user;
+```
+
+可能被阻塞。
+
+---
+
+## 6.3 InnoDB 一般不推荐手动表锁
+
+InnoDB 支持行级锁，通常不需要手动锁整张表。
+
+表级锁粒度太粗：
+
+```text
+优点：管理简单
+缺点：并发性能差
+```
+
+一般只有特殊维护、批处理、兼容老系统时才会考虑。
+
+---
+
+# 7. 行级锁 Row Lock
+
+InnoDB 最核心的是行级锁。
+
+行级锁不是直接锁“物理行”，而是：
+
+> **锁索引记录。**
+
+这句话非常重要。
+
+InnoDB 的行锁是加在索引上的。如果查询条件没有走索引，InnoDB 可能扫描很多索引记录，从而锁住大量数据。
+
+---
+
+## 7.1 主键等值更新：精确锁一行
+
+表：
+
+```sql
+CREATE TABLE user (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT
+) ENGINE=InnoDB;
+```
+
+事务 T1：
+
+```sql
+BEGIN;
+
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+因为 `id` 是主键索引，InnoDB 可以精确找到 `id = 1` 这一条记录，并对它加行级排他锁。
+
+事务 T2：
+
+```sql
+BEGIN;
+
+UPDATE user SET age = 30 WHERE id = 2;
+```
+
+可以执行，因为它修改的是另一行。
+
+这就是行级锁的优势：
+
+```text
+不同事务修改不同行时，可以并发执行。
+```
+
+---
+
+## 7.2 没有索引时锁范围会扩大
+
+假设表：
+
+```sql
+CREATE TABLE user (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT
+) ENGINE=InnoDB;
+```
+
+注意：`age` 没有索引。
+
+事务 T1：
+
+```sql
+BEGIN;
+
+UPDATE user SET name = 'Tom' WHERE age = 18;
+```
+
+因为 `age` 没有索引，InnoDB 可能需要扫描聚簇索引中的大量记录。
+
+它在扫描过程中会对满足条件或扫描到的相关记录加锁，导致锁范围扩大。
+
+事务 T2：
+
+```sql
+UPDATE user SET name = 'Bob' WHERE age = 20;
+```
+
+即使 T2 更新的是 `age = 20`，也可能受到影响。
+
+所以面试里常说：
+
+> InnoDB 行锁依赖索引。条件不走索引，可能导致大量行被锁，甚至表现得像锁表。
+
+---
+
+# 8. 意向锁 Intention Lock
+
+意向锁是表级锁，但它不是为了直接锁数据，而是为了协调表锁和行锁。
+
+常见两种：
+
+```text
+IS Lock：Intention Shared Lock，意向共享锁
+IX Lock：Intention Exclusive Lock，意向排他锁
+```
+
+---
+
+## 8.1 为什么需要意向锁？
+
+假设事务 T1 已经锁了 `user` 表中的某一行：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1 FOR UPDATE;
+```
+
+这时 T1 对 `id = 1` 加了行级排他锁。
+
+现在事务 T2 想锁整张表：
+
+```sql
+LOCK TABLES user WRITE;
+```
+
+MySQL 怎么知道这张表里有没有某些行已经被别人锁了？
+
+如果没有意向锁，数据库可能要检查整张表的每一行有没有行锁，成本很高。
+
+意向锁的作用是：
+
+> 在加行锁之前，先在表上放一个标记，告诉别人：这张表内部已经有人准备或正在锁某些行。
+
+---
+
+## 8.2 IX Lock 例子
+
+事务 T1：
+
+```sql
+BEGIN;
+
+UPDATE user SET age = 20 WHERE id = 1;
+```
+
+InnoDB 会做两件事：
+
+```text
+1. 在 user 表上加 IX 意向排他锁
+2. 在 id = 1 这条索引记录上加 X 排他锁
+```
+
+为什么要先加 IX？
+
+因为 IX 表示：
+
+```text
+我准备在这张表里的某些行上加排他锁。
+```
+
+这时如果事务 T2 想加整表写锁：
+
+```sql
+LOCK TABLES user WRITE;
+```
+
+就会发现表上已有 IX Lock，说明表内部有行级排他锁，于是不能直接加表写锁。
+
+---
+
+## 8.3 IS Lock 例子
+
+事务 T1：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1 FOR SHARE;
+```
+
+InnoDB 会：
+
+```text
+1. 在 user 表上加 IS 意向共享锁
+2. 在 id = 1 这条记录上加 S 共享锁
+```
+
+IS 表示：
+
+```text
+我准备在这张表里的某些行上加共享锁。
+```
+
+---
+
+## 8.4 意向锁兼容性
+
+常见理解：
+
+```text
+IS 和 IS 兼容
+IS 和 IX 兼容
+IX 和 IX 兼容
+```
+
+因为多个事务可以分别锁不同的行。
+
+但是：
+
+```text
+IX 和表级 S/X 锁可能冲突
+IS 和表级 X 锁冲突
+```
+
+你不需要一开始死背完整矩阵，先理解它的目的：
+
+> **意向锁是表级标记，用来快速判断表锁和行锁是否冲突。**
+
+---
+
+# 9. Record Lock 记录锁
+
+Record Lock 是锁住某一条**已经存在的索引记录**。
+
+注意：
+
+> Record Lock 锁的是索引记录，不是抽象意义上的整行。
+
+---
+
+## 9.1 主键记录锁例子
+
+表：
+
+```sql
+CREATE TABLE user (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT
+) ENGINE=InnoDB;
+
+INSERT INTO user VALUES
+(1, 'Alice', 18),
+(2, 'Bob', 20),
+(3, 'Cindy', 25);
+```
+
+事务 T1：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 2 FOR UPDATE;
+```
+
+因为 `id` 是主键，并且是等值查询，所以 InnoDB 精确锁住：
+
+```text
+id = 2 这条主键索引记录
+```
+
+这就是 Record Lock。
+
+事务 T2：
+
+```sql
+UPDATE user SET age = 30 WHERE id = 2;
+```
+
+会被阻塞。
+
+事务 T3：
+
+```sql
+UPDATE user SET age = 30 WHERE id = 3;
+```
+
+可以执行。
+
+---
+
+# 10. Gap Lock 间隙锁
+
+Gap Lock 是锁住两个索引记录之间的间隙。
+
+它不锁已有记录本身，主要防止别人往这个间隙插入新记录。
+
+---
+
+## 10.1 为什么需要 Gap Lock？
+
+为了防止幻读。
+
+假设索引中有：
+
+```text
+id = 10
+id = 20
+id = 30
+```
+
+那么它们之间有间隙：
+
+```text
+(10, 20)
+(20, 30)
+```
+
+如果事务 T1 正在锁定某个范围，InnoDB 可能会锁住这些间隙，防止其他事务插入新记录。
+
+---
+
+## 10.2 Gap Lock 例子
+
+表：
+
+```sql
+CREATE TABLE user (
+    id INT PRIMARY KEY,
+    name VARCHAR(50)
+) ENGINE=InnoDB;
+
+INSERT INTO user VALUES
+(10, 'Alice'),
+(20, 'Bob'),
+(30, 'Cindy');
+```
+
+事务 T1，RR 隔离级别：
+
+```sql
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+
+SELECT * FROM user WHERE id BETWEEN 10 AND 20 FOR UPDATE;
+```
+
+这个查询可能锁住：
+
+```text
+id = 10
+id = 20
+以及 10 和 20 之间的间隙
+```
+
+事务 T2：
+
+```sql
+INSERT INTO user VALUES (15, 'Tom');
+```
+
+`id = 15` 落在 `(10, 20)` 这个间隙里，所以可能被阻塞。
+
+这就是 Gap Lock 的作用：
+
+```text
+防止其他事务插入范围内的新行。
+```
+
+---
+
+# 11. Next-Key Lock 临键锁
+
+Next-Key Lock 是 InnoDB 非常重要的锁。
+
+它等于：
+
+```text
+Next-Key Lock = Record Lock + Gap Lock
+```
+
+也就是锁住：
+
+```text
+某条索引记录
++
+这条记录前面的间隙
+```
+
+它通常是左开右闭区间：
+
+```text
+(前一个索引值, 当前索引值]
+```
+
+---
+
+## 11.1 具体例子
+
+表：
+
+```sql
+CREATE TABLE user (
+    id INT PRIMARY KEY,
+    age INT,
+    name VARCHAR(50),
+    INDEX idx_age(age)
+) ENGINE=InnoDB;
+
+INSERT INTO user VALUES
+(1, 10, 'Alice'),
+(2, 20, 'Bob'),
+(3, 30, 'Cindy');
+```
+
+`idx_age` 索引顺序是：
+
+```text
+10, 20, 30
+```
+
+这些 Next-Key 区间可以理解为：
+
+```text
+(-∞, 10]
+(10, 20]
+(20, 30]
+(30, +∞)
+```
+
+事务 T1：
+
+```sql
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+
+SELECT * FROM user WHERE age BETWEEN 10 AND 20 FOR UPDATE;
+```
+
+T1 可能锁住：
+
+```text
+(-∞, 10]
+(10, 20]
+```
+
+也就是：
+
+```text
+锁住 age=10 这条记录
+锁住 age=20 这条记录
+锁住 10 和 20 之间的间隙
+```
+
+事务 T2：
+
+```sql
+INSERT INTO user VALUES (4, 15, 'Tom');
+```
+
+`age = 15` 落在 `(10, 20)` 这个间隙中，所以会被阻塞。
+
+事务 T3：
+
+```sql
+UPDATE user SET name = 'Bobby' WHERE age = 20;
+```
+
+`age = 20` 这条记录也被锁住，所以 T3 也会被阻塞。
+
+这就是 Next-Key Lock：
+
+```text
+既防止已有记录被修改
+又防止新记录插入导致幻读
+```
+
+---
+
+# 12. Insert Intention Lock 插入意向锁
+
+插入意向锁是 Gap Lock 的一种特殊形式。
+
+它表示：
+
+> 某个事务准备往某个索引间隙中插入一条记录。
+
+它的重点是提高并发。
+
+---
+
+## 12.1 为什么需要插入意向锁？
+
+假设索引中有：
+
+```text
+10, 20
+```
+
+两个事务分别想插入：
+
+```text
+事务 T1 插入 11
+事务 T2 插入 19
+```
+
+它们都在 `(10, 20)` 这个间隙里，但插入位置不同。
+
+如果一概互相阻塞，并发性能会很差。
+
+插入意向锁允许多个事务同时表达：
+
+```text
+我也想插入这个 gap
+```
+
+只要它们插入的位置不冲突，就可以并发。
+
+---
+
+## 12.2 具体例子
+
+表：
+
+```sql
+CREATE TABLE user (
+    id INT PRIMARY KEY,
+    name VARCHAR(50)
+) ENGINE=InnoDB;
+
+INSERT INTO user VALUES
+(10, 'Alice'),
+(20, 'Bob');
+```
+
+事务 T1：
+
+```sql
+BEGIN;
+
+INSERT INTO user VALUES (11, 'Tom');
+```
+
+事务 T2：
+
+```sql
+BEGIN;
+
+INSERT INTO user VALUES (19, 'Jerry');
+```
+
+如果没有其他事务对 `(10, 20)` 加 Gap Lock，这两个插入通常可以并发执行。
+
+它们都会在 `(10, 20)` 这个 gap 上有插入意向，但插入的具体 key 不同，所以不一定互相阻塞。
+
+---
+
+## 12.3 被 Gap Lock 阻塞的情况
+
+如果事务 T0 先执行：
+
+```sql
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+BEGIN;
+
+SELECT * FROM user WHERE id BETWEEN 10 AND 20 FOR UPDATE;
+```
+
+它锁住了 `(10, 20)` 这个间隙。
+
+这时事务 T1：
+
+```sql
+INSERT INTO user VALUES (11, 'Tom');
+```
+
+会被阻塞。
+
+因为 T1 的插入意向锁和 T0 的 Gap Lock 冲突。
+
+---
+
+# 13. AUTO-INC Lock 自增锁
+
+AUTO-INC Lock 用于自增主键。
+
+比如：
+
+```sql
+CREATE TABLE orders (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    amount INT
+) ENGINE=InnoDB;
+```
+
+当插入数据时：
+
+```sql
+INSERT INTO orders(amount) VALUES (100);
+```
+
+数据库要分配一个新的自增 id。
+
+为了保证多个事务并发插入时自增值不会混乱，InnoDB 需要某种自增协调机制。
+
+---
+
+## 13.1 具体例子
+
+事务 T1：
+
+```sql
+BEGIN;
+
+INSERT INTO orders(amount) VALUES (100);
+```
+
+系统分配：
+
+```text
+id = 1
+```
+
+事务 T2：
+
+```sql
+BEGIN;
+
+INSERT INTO orders(amount) VALUES (200);
+```
+
+系统分配：
+
+```text
+id = 2
+```
+
+InnoDB 要保证：
+
+```text
+自增 id 不重复
+批量插入时分配规则可控
+```
+
+这就涉及 AUTO-INC Lock 或轻量级自增锁机制。
+
+---
+
+## 13.2 为什么自增锁影响并发？
+
+如果大量事务同时执行：
+
+```sql
+INSERT INTO orders(amount) VALUES (...);
+```
+
+它们都需要申请自增值。
+
+InnoDB 需要协调自增计数器，因此在某些模式下会形成竞争。
+
+不过现代 MySQL 中，`innodb_autoinc_lock_mode` 可以控制自增锁策略。你先不用深入配置，先知道：
+
+```text
+AUTO-INC Lock 用来保证自增列分配正确。
+```
+
+---
+
+# 14. Metadata Lock，MDL 元数据锁
+
+MDL 是 MySQL Server 层的锁，不是 InnoDB 独有。
+
+它保护的是：
+
+```text
+表结构元数据
+```
+
+比如防止一个事务正在查询表时，另一个事务把表结构改了。
+
+---
+
+## 14.1 具体例子
+
+事务 T1：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1;
+```
+
+只要事务没结束，MySQL 会持有某种 MDL 读锁，表示：
+
+```text
+我正在使用 user 表的结构。
+```
+
+事务 T2：
+
+```sql
+ALTER TABLE user ADD COLUMN email VARCHAR(100);
+```
+
+T2 可能会等待。
+
+因为如果 T1 还在使用旧表结构，T2 不能随便改表结构。
+
+---
+
+## 14.2 MDL 的常见坑
+
+很多线上问题是这样发生的：
+
+事务 T1：
+
+```sql
+BEGIN;
+
+SELECT * FROM user WHERE id = 1;
+
+-- 长时间不 COMMIT
+```
+
+事务 T2：
+
+```sql
+ALTER TABLE user ADD COLUMN email VARCHAR(100);
+```
+
+T2 被 MDL 阻塞。
+
+然后事务 T3、T4、T5 后续所有访问 `user` 表的语句也可能排队，导致业务卡住。
+
+所以线上执行 DDL 要小心。
+
+---
+
+# 15. 乐观锁和悲观锁
+
+这两个不是 InnoDB 内部锁类型，而是应用层并发控制思想。
+
+---
+
+## 15.1 悲观锁
+
+悲观锁的思想是：
+
+> 我认为别人很可能会并发修改，所以我先加锁。
+
+典型 SQL：
+
+```sql
+BEGIN;
+
+SELECT * FROM product WHERE id = 1 FOR UPDATE;
+
+UPDATE product SET stock = stock - 1 WHERE id = 1;
+
+COMMIT;
+```
+
+这里 `FOR UPDATE` 就是悲观锁思想。
+
+---
+
+## 15.2 悲观锁例子：库存扣减
+
+商品表：
+
+```sql
+CREATE TABLE product (
+    id INT PRIMARY KEY,
+    stock INT
+) ENGINE=InnoDB;
+
+INSERT INTO product VALUES (1, 10);
+```
+
+事务 T1：
+
+```sql
+BEGIN;
+
+SELECT stock FROM product WHERE id = 1 FOR UPDATE;
+
+UPDATE product SET stock = stock - 1 WHERE id = 1;
+
+COMMIT;
+```
+
+在 T1 提交前，其他事务不能同时修改这条库存记录。
+
+优点：
+
+```text
+安全，逻辑简单
+```
+
+缺点：
+
+```text
+并发性能较差，容易等待
+```
+
+---
+
+## 15.3 乐观锁
+
+乐观锁的思想是：
+
+> 我假设冲突不多，先不加锁，更新时检查数据有没有被别人改过。
+
+常见做法是加 `version` 字段。
+
+表：
+
+```sql
+CREATE TABLE product (
+    id INT PRIMARY KEY,
+    stock INT,
+    version INT
+) ENGINE=InnoDB;
+
+INSERT INTO product VALUES (1, 10, 1);
+```
+
+事务先读：
+
+```sql
+SELECT stock, version FROM product WHERE id = 1;
+```
+
+假设读到：
+
+```text
+stock = 10
+version = 1
+```
+
+更新时：
+
+```sql
+UPDATE product
+SET stock = stock - 1,
+    version = version + 1
+WHERE id = 1
+  AND version = 1;
+```
+
+如果返回：
+
+```text
+affected rows = 1
+```
+
+说明更新成功。
+
+如果返回：
+
+```text
+affected rows = 0
+```
+
+说明这期间别人已经改过，当前事务需要重试。
+
+---
+
+# 16. 常见锁和例子总结表
+
+| 锁类型                         | 作用           | 典型 SQL                             | 具体效果                   |
+| --------------------------- | ------------ | ---------------------------------- | ---------------------- |
+| S Lock 共享锁                  | 允许读，阻止写      | `SELECT ... FOR SHARE`             | 多个事务可共享读               |
+| X Lock 排他锁                  | 修改数据，阻止其他锁   | `UPDATE` / `FOR UPDATE`            | 其他事务不能改同一行             |
+| Table Lock 表锁               | 锁整张表         | `LOCK TABLES user WRITE`           | 并发差                    |
+| Row Lock 行锁                 | 锁索引记录        | `UPDATE ... WHERE id=1`            | 不同行可并发                 |
+| Intention Lock 意向锁          | 表级标记，协调表锁和行锁 | 自动加                                | 表示表内有行锁                |
+| Record Lock 记录锁             | 锁已有索引记录      | `WHERE id=1 FOR UPDATE`            | 阻止修改该记录                |
+| Gap Lock 间隙锁                | 锁索引间隙        | 范围当前读                              | 阻止插入新记录                |
+| Next-Key Lock 临键锁           | 记录锁 + 间隙锁    | `WHERE age BETWEEN ... FOR UPDATE` | 防止幻读                   |
+| Insert Intention Lock 插入意向锁 | 表示准备插入 gap   | `INSERT`                           | 多插入可并发，但会被 Gap Lock 阻塞 |
+| AUTO-INC Lock 自增锁           | 分配自增 id      | `INSERT` 自增表                       | 保证自增值正确                |
+| MDL 元数据锁                    | 保护表结构        | `SELECT` / `ALTER TABLE`           | 防止查询时表结构被改             |
+
+---
+
+# 17. 最重要的学习主线
+
+你可以按下面这条线理解 InnoDB 锁：
+
+```text
+普通 SELECT：
+    快照读
+    MVCC + Read View
+    通常不加锁
+
+SELECT ... FOR SHARE：
+    当前读
+    加 S Lock
+
+SELECT ... FOR UPDATE：
+    当前读
+    加 X Lock
+
+UPDATE / DELETE：
+    当前读 + 修改
+    加 X Lock
+
+唯一索引等值查询：
+    多数情况下是 Record Lock
+
+范围查询 / 非唯一索引查询：
+    可能使用 Gap Lock / Next-Key Lock
+
+INSERT：
+    会有 Insert Intention Lock
+    自增列还涉及 AUTO-INC Lock
+
+DDL：
+    涉及 MDL 元数据锁
+```
+
+---
+
+# 18. 面试回答模板
+
+如果面试官问：
+
+> MySQL InnoDB 有哪些锁？
+
+你可以这样答：
+
+```text
+InnoDB 的锁可以从几个层面理解。首先，从读写关系看，有共享锁 S Lock 和排他锁 X Lock，共享锁之间兼容，排他锁与其他锁不兼容。其次，从粒度看，有表级锁和行级锁，InnoDB 主要使用行级锁，而行锁实际加在索引记录上。为了协调表锁和行锁，InnoDB 有意向锁，包括 IS 和 IX。再往底层看，InnoDB 有 Record Lock、Gap Lock 和 Next-Key Lock。Record Lock 锁住已有索引记录，Gap Lock 锁住索引间隙防止插入，Next-Key Lock 是 Record Lock 加 Gap Lock，主要用于 RR 隔离级别下的当前读防止幻读。此外，INSERT 会涉及插入意向锁，自增主键会涉及 AUTO-INC 锁，DDL 和普通查询之间还会涉及 MDL 元数据锁。
+```
+
+---
+
+# 19. 最核心总结
+
+**InnoDB 锁机制的核心是：普通 SELECT 靠 MVCC，不加锁；当前读和写操作要加锁。精确唯一索引查询通常加 Record Lock，范围查询和非唯一索引查询可能加 Gap Lock 或 Next-Key Lock 来防止幻读。S/X 锁控制读写互斥，意向锁协调表锁和行锁，插入意向锁提高插入并发，MDL 保护表结构。理解这些锁，关键是记住：InnoDB 的行锁是加在索引上的，锁范围取决于 SQL 是否走索引以及查询条件是什么。**
+
+
 
 
 
