@@ -1433,6 +1433,904 @@ PRIMARY 非叶子 Page -> PRIMARY 叶子 Page -> 完整行
 
 
 
+## SQL最左索引原则🤖
+SQL 的**最左索引原则**，更准确叫 **最左前缀原则**，主要针对**联合索引**。
+
+一句话：
+
+> 对于联合索引 `(a, b, c)`，MySQL 使用索引时，通常必须从最左边的字段 `a` 开始，按照索引定义的顺序连续使用，不能跳过中间字段。
+
+---
+
+# 1. 先看什么是联合索引
+
+假设有一张用户表：
+
+```sql
+CREATE TABLE user (
+    id BIGINT PRIMARY KEY,
+    name VARCHAR(50),
+    age INT,
+    city VARCHAR(50),
+    gender VARCHAR(10),
+    INDEX idx_name_age_city(name, age, city)
+) ENGINE=InnoDB;
+```
+
+这里有一个联合索引：
+
+```sql
+INDEX idx_name_age_city(name, age, city)
+```
+
+这个索引不是分别给 `name`、`age`、`city` 建了三个索引，而是建立了一棵按照下面顺序排序的 B+Tree：
+
+```text
+先按 name 排序
+name 相同，再按 age 排序
+age 相同，再按 city 排序
+```
+
+所以这个联合索引的逻辑顺序可以理解为：
+
+```text
+name    age    city      id
+Alice   18     Beijing   1
+Alice   18     Paris     2
+Alice   20     London    3
+Bob     18     Paris     4
+Bob     22     Berlin    5
+Cindy   20     Rome      6
+David   25     Paris     7
+```
+
+也就是说，联合索引 `(name, age, city)` 本质上是按照字典序排列的：
+
+```text
+(name, age, city)
+```
+
+这就像英文词典：
+
+```text
+先按第一个字母排
+第一个字母相同，再按第二个字母排
+第二个字母相同，再按第三个字母排
+```
+
+---
+
+# 2. 什么是最左前缀？
+
+对于联合索引：
+
+```sql
+(name, age, city)
+```
+
+它可以支持这些前缀：
+
+```text
+name
+name, age
+name, age, city
+```
+
+也就是说，它可以高效支持：
+
+```sql
+WHERE name = 'Alice';
+```
+
+```sql
+WHERE name = 'Alice' AND age = 18;
+```
+
+```sql
+WHERE name = 'Alice' AND age = 18 AND city = 'Paris';
+```
+
+因为这些查询都是从最左边的 `name` 开始，并且没有跳过中间字段。
+
+但是它通常不能很好支持：
+
+```sql
+WHERE age = 18;
+```
+
+或者：
+
+```sql
+WHERE city = 'Paris';
+```
+
+或者：
+
+```sql
+WHERE age = 18 AND city = 'Paris';
+```
+
+因为这些条件没有从联合索引最左边的 `name` 开始。
+
+---
+
+# 3. 为什么必须从最左边开始？
+
+因为联合索引的排序方式决定了它的查找能力。
+
+联合索引 `(name, age, city)` 的排序是：
+
+```text
+先 name
+再 age
+再 city
+```
+
+所以在这棵 B+Tree 里，`age` 不是全局有序的，`city` 也不是全局有序的。
+
+看这个索引数据：
+
+```text
+name    age    city
+Alice   18     Beijing
+Alice   18     Paris
+Alice   20     London
+Bob     18     Paris
+Bob     22     Berlin
+Cindy   20     Rome
+David   25     Paris
+```
+
+你看 `age` 这一列：
+
+```text
+18
+18
+20
+18
+22
+20
+25
+```
+
+它不是整体有序的。
+
+因为索引首先按 `name` 排序，只有在 `name` 相同的情况下，`age` 才是有序的。
+
+所以如果你查询：
+
+```sql
+WHERE age = 18
+```
+
+MySQL 没办法直接在 `(name, age, city)` 这棵索引树里快速定位所有 `age = 18` 的记录。因为 `age = 18` 分散在不同 `name` 分组下面：
+
+```text
+Alice, 18
+Bob,   18
+```
+
+所以最左列 `name` 非常关键。
+
+---
+
+# 4. 具体走一遍：能用完整联合索引的情况
+
+现在执行：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice'
+  AND age = 18
+  AND city = 'Paris';
+```
+
+索引是：
+
+```sql
+idx_name_age_city(name, age, city)
+```
+
+因为查询条件完整匹配了：
+
+```text
+name -> age -> city
+```
+
+所以 MySQL 可以高效使用整个联合索引。
+
+查找过程大致是：
+
+```text
+第一步：在 idx_name_age_city 这棵 B+Tree 中查 name = 'Alice'
+
+第二步：在 name = 'Alice' 的范围内继续查 age = 18
+
+第三步：在 name = 'Alice' 且 age = 18 的范围内继续查 city = 'Paris'
+
+第四步：找到对应的二级索引记录
+
+第五步：如果 SELECT * 需要完整行，就根据二级索引叶子节点里的主键 id 回表
+```
+
+图示：
+
+```text
+联合索引 idx_name_age_city：
+
+name    age    city      id
+Alice   18     Beijing   1
+Alice   18     Paris     2   ← 命中
+Alice   20     London    3
+Bob     18     Paris     4
+Bob     22     Berlin    5
+Cindy   20     Rome      6
+```
+
+对于这条 SQL：
+
+```sql
+WHERE name = 'Alice'
+  AND age = 18
+  AND city = 'Paris'
+```
+
+可以理解为在索引中定位这个三元组：
+
+```text
+('Alice', 18, 'Paris')
+```
+
+这是最理想的情况。
+
+---
+
+# 5. 只用最左一列的情况
+
+执行：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice';
+```
+
+这也能使用联合索引。
+
+因为 `(name, age, city)` 的最左前缀包含 `name`。
+
+查找过程：
+
+```text
+第一步：在索引里定位 name = 'Alice' 的起点
+
+第二步：沿着叶子节点向后扫描所有 name = 'Alice' 的记录
+
+第三步：得到这些 id
+
+第四步：如果需要完整行，再回表
+```
+
+索引中：
+
+```text
+name    age    city      id
+Alice   18     Beijing   1   ← 命中
+Alice   18     Paris     2   ← 命中
+Alice   20     London    3   ← 命中
+Bob     18     Paris     4
+Bob     22     Berlin    5
+```
+
+它可以直接找到 `Alice` 这一段，因为 `name` 是联合索引的第一列。
+
+所以 `(name, age, city)` 可以当作一个单列索引 `name` 来用。
+
+---
+
+# 6. 使用前两列的情况
+
+执行：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice'
+  AND age = 18;
+```
+
+这也能使用联合索引的前两列：
+
+```text
+name, age
+```
+
+过程是：
+
+```text
+第一步：定位 name = 'Alice'
+
+第二步：在 Alice 这一段里定位 age = 18
+
+第三步：找到所有满足 name = 'Alice' AND age = 18 的记录
+
+第四步：如果 SELECT *，再回表
+```
+
+索引中：
+
+```text
+name    age    city      id
+Alice   18     Beijing   1   ← 命中
+Alice   18     Paris     2   ← 命中
+Alice   20     London    3
+Bob     18     Paris     4
+```
+
+因为在 `name = Alice` 的范围内，`age` 是有序的，所以可以继续用 `age` 做索引定位。
+
+---
+
+# 7. 跳过中间列会怎样？
+
+执行：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice'
+  AND city = 'Paris';
+```
+
+索引是：
+
+```sql
+(name, age, city)
+```
+
+这条 SQL 有 `name` 和 `city`，但跳过了中间的 `age`。
+
+这时候 MySQL 通常只能高效使用 `name` 这一列来缩小范围，不能像完整匹配一样直接用 `city` 定位。
+
+为什么？
+
+因为索引排序是：
+
+```text
+name -> age -> city
+```
+
+在 `name = Alice` 的范围内，记录是先按 `age` 排序，再按 `city` 排序：
+
+```text
+name    age    city
+Alice   18     Beijing
+Alice   18     Paris
+Alice   20     London
+Alice   22     Paris
+Alice   30     Rome
+```
+
+如果不知道 `age`，那么 `city = Paris` 在 `Alice` 分组里不一定连续。
+
+所以执行逻辑大概是：
+
+```text
+第一步：用索引定位 name = 'Alice' 这一段
+
+第二步：扫描 Alice 这一段中的多条记录
+
+第三步：逐条判断 city 是否等于 Paris
+```
+
+也就是说：
+
+```text
+name 可以用于索引定位
+city 可能只能作为过滤条件
+```
+
+这就是“跳过中间列，后面的列通常不能继续用于精确定位”。
+
+---
+
+# 8. 完全不使用最左列会怎样？
+
+执行：
+
+```sql
+SELECT *
+FROM user
+WHERE age = 18;
+```
+
+索引是：
+
+```sql
+(name, age, city)
+```
+
+这条 SQL 没有 `name`，只有 `age`。
+
+由于 `age` 不是联合索引的最左列，所以这条 SQL 通常不能有效利用这个联合索引进行快速定位。
+
+原因是索引数据是这样排的：
+
+```text
+name    age
+Alice   18
+Alice   20
+Bob     18
+Bob     22
+Cindy   18
+David   30
+```
+
+`age = 18` 分散在不同 `name` 下面：
+
+```text
+Alice 18
+Bob   18
+Cindy 18
+```
+
+如果没有 `name`，MySQL 很难直接找到所有 `age = 18` 的连续区间。
+
+所以如果你经常查询：
+
+```sql
+WHERE age = 18
+```
+
+应该单独给 `age` 建索引：
+
+```sql
+INDEX idx_age(age)
+```
+
+或者根据业务查询模式重新设计联合索引：
+
+```sql
+INDEX idx_age_name(age, name)
+```
+
+---
+
+# 9. 范围查询会影响后续列使用
+
+这是最左前缀原则中非常重要的一点。
+
+假设索引还是：
+
+```sql
+INDEX idx_name_age_city(name, age, city)
+```
+
+执行：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice'
+  AND age > 18
+  AND city = 'Paris';
+```
+
+很多初学者会以为这条 SQL 可以完整用到：
+
+```text
+name, age, city
+```
+
+但实际上要更细。
+
+因为 `age > 18` 是范围查询。
+
+一般情况下，联合索引在遇到范围条件后，后面的列就很难继续用于精确定位。
+
+也就是说：
+
+```text
+name 可以用
+age 可以用作范围扫描
+city 通常不能继续用于缩小索引定位范围
+```
+
+执行过程类似：
+
+```text
+第一步：定位 name = 'Alice'
+
+第二步：在 Alice 范围内找到 age > 18 的起点
+
+第三步：向后扫描所有 age > 18 的索引记录
+
+第四步：扫描过程中再判断 city 是否等于 Paris
+```
+
+索引中：
+
+```text
+name    age    city
+Alice   18     Beijing
+Alice   18     Paris
+Alice   20     London
+Alice   22     Paris
+Alice   30     Rome
+Bob     18     Paris
+```
+
+对于：
+
+```sql
+WHERE name = 'Alice'
+  AND age > 18
+  AND city = 'Paris'
+```
+
+它会先锁定：
+
+```text
+Alice 且 age > 18
+```
+
+这段范围：
+
+```text
+Alice   20   London
+Alice   22   Paris    ← city 满足
+Alice   30   Rome
+```
+
+然后再过滤 `city = 'Paris'`。
+
+所以记住：
+
+> 联合索引中，如果前面字段使用了范围查询，后面的字段通常不能继续用于索引的精确定位。
+
+常见范围条件包括：
+
+```sql
+>
+<
+>=
+<=
+BETWEEN
+LIKE 'abc%'
+```
+
+其中 `LIKE 'abc%'` 本质上也是范围查询。
+
+---
+
+# 10. 等值查询顺序和索引顺序不是一回事
+
+比如索引是：
+
+```sql
+INDEX idx_name_age_city(name, age, city)
+```
+
+执行：
+
+```sql
+SELECT *
+FROM user
+WHERE age = 18
+  AND city = 'Paris'
+  AND name = 'Alice';
+```
+
+虽然 SQL 里条件顺序写成了：
+
+```text
+age -> city -> name
+```
+
+但是 MySQL 优化器会重排条件。
+
+这条 SQL 依然可以使用：
+
+```text
+name, age, city
+```
+
+因为逻辑上它包含了：
+
+```text
+name = 'Alice'
+age = 18
+city = 'Paris'
+```
+
+也就是说，最左前缀原则关注的是**联合索引定义中的字段顺序**，不是你 SQL 里 WHERE 条件的书写顺序。
+
+下面两条 SQL 在索引使用上通常等价：
+
+```sql
+WHERE name = 'Alice'
+  AND age = 18
+  AND city = 'Paris';
+```
+
+```sql
+WHERE city = 'Paris'
+  AND age = 18
+  AND name = 'Alice';
+```
+
+关键是索引定义：
+
+```sql
+(name, age, city)
+```
+
+而不是 WHERE 里面谁写在前面。
+
+---
+
+# 11. ORDER BY 也受最左前缀影响
+
+最左前缀不仅影响 `WHERE`，也影响 `ORDER BY`。
+
+索引：
+
+```sql
+INDEX idx_name_age_city(name, age, city)
+```
+
+这条 SQL 可以较好利用索引排序：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice'
+ORDER BY age, city;
+```
+
+因为在 `name = Alice` 的范围内，索引天然按照：
+
+```text
+age, city
+```
+
+排序。
+
+但这条就不一定好：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice'
+ORDER BY city;
+```
+
+因为索引在 `name = Alice` 内部的排序是：
+
+```text
+age -> city
+```
+
+不是单独按 `city` 排序。
+
+所以可能需要额外排序，也就是 `filesort`。
+
+---
+
+# 12. 用一个完整流程带你走一遍
+
+我们现在用这个联合索引：
+
+```sql
+INDEX idx_name_age_city(name, age, city)
+```
+
+查询：
+
+```sql
+SELECT *
+FROM user
+WHERE name = 'Alice'
+  AND age = 18
+  AND city = 'Paris';
+```
+
+## 第一步：理解索引排序
+
+联合索引叶子节点大概是：
+
+```text
+name    age    city      id
+Alice   18     Beijing   1
+Alice   18     Paris     2
+Alice   20     London    3
+Bob     18     Paris     4
+Bob     22     Berlin    5
+Cindy   20     Rome      6
+```
+
+它按 `(name, age, city)` 排序。
+
+---
+
+## 第二步：从最左列 name 开始定位
+
+MySQL 先找：
+
+```text
+name = Alice
+```
+
+这样可以定位到这一段：
+
+```text
+Alice   18     Beijing   1
+Alice   18     Paris     2
+Alice   20     London    3
+```
+
+---
+
+## 第三步：继续用 age 缩小范围
+
+在 `Alice` 这一段中，再找：
+
+```text
+age = 18
+```
+
+范围缩小为：
+
+```text
+Alice   18     Beijing   1
+Alice   18     Paris     2
+```
+
+---
+
+## 第四步：继续用 city 精确定位
+
+在 `Alice + age=18` 这一段中，再找：
+
+```text
+city = Paris
+```
+
+最后命中：
+
+```text
+Alice   18     Paris     2
+```
+
+---
+
+## 第五步：判断是否需要回表
+
+因为 SQL 是：
+
+```sql
+SELECT *
+```
+
+联合索引叶子节点里只有：
+
+```text
+name, age, city, 主键 id
+```
+
+如果表里还有其他字段，比如 `gender`、`email`、`created_at`，那就需要根据 `id = 2` 回到聚簇索引查完整行。
+
+流程是：
+
+```text
+idx_name_age_city
+      |
+      v
+找到 name='Alice', age=18, city='Paris' 对应的 id=2
+      |
+      v
+PRIMARY(id)
+      |
+      v
+查完整行
+```
+
+如果 SQL 是：
+
+```sql
+SELECT id, name, age, city
+FROM user
+WHERE name = 'Alice'
+  AND age = 18
+  AND city = 'Paris';
+```
+
+那就不需要回表，因为这几个字段都在联合索引里。
+
+这就是覆盖索引。
+
+---
+
+# 13. 常见情况总结
+
+假设联合索引是：
+
+```sql
+INDEX idx_abc(a, b, c)
+```
+
+下面是各种查询是否能较好使用索引：
+
+```text
+查询条件                         索引使用情况
+---------------------------------------------------------
+WHERE a = 1                      可以用 a
+
+WHERE a = 1 AND b = 2            可以用 a, b
+
+WHERE a = 1 AND b = 2 AND c = 3  可以用 a, b, c
+
+WHERE b = 2                      通常不能有效用 idx_abc
+
+WHERE c = 3                      通常不能有效用 idx_abc
+
+WHERE b = 2 AND c = 3            通常不能有效用 idx_abc
+
+WHERE a = 1 AND c = 3            通常只能用 a，c 用作过滤
+
+WHERE a = 1 AND b > 2 AND c = 3  通常用 a, b 范围，c 用作过滤
+
+WHERE a > 1 AND b = 2            通常用 a 范围，b 难以继续精确定位
+```
+
+---
+
+# 14. 记忆口诀
+
+可以这样记：
+
+```text
+从左到右，连续匹配；
+中间不能断；
+遇到范围，后面变弱；
+等值顺序可调整；
+排序也要看索引顺序。
+```
+
+更口语一点：
+
+> 联合索引就像电话簿，先按姓排，再按名排。你知道姓，可以快速找；你知道姓和名，更快；但你只知道名，不知道姓，就很难直接定位。
+
+---
+
+# 15. 最核心总结
+
+**最左前缀原则指的是：对于联合索引 `(a, b, c)`，MySQL 使用索引时通常要从最左列 `a` 开始，按顺序连续使用 `a -> b -> c`，不能跳过中间列。原因是联合索引在 B+Tree 中是按 `(a, b, c)` 的字典序排列的，只有在前一列确定的情况下，后一列才是有序可定位的。**
+
+所以：
+
+```sql
+INDEX(a, b, c)
+```
+
+可以高效支持：
+
+```sql
+WHERE a = ?
+WHERE a = ? AND b = ?
+WHERE a = ? AND b = ? AND c = ?
+```
+
+但不适合单独支持：
+
+```sql
+WHERE b = ?
+WHERE c = ?
+WHERE b = ? AND c = ?
+```
+
+除非 MySQL 使用特殊优化，或者优化器认为扫描索引比扫描全表更划算，但这已经不是典型意义上的“完整命中最左前缀”了。
 
 
 
