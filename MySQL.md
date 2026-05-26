@@ -3873,7 +3873,30 @@ Read View 决定当前事务能看到哪个版本；
 InnoDB 根据 Read View 在版本链中找到可见版本返回。
 ```
 
+12. 最终总结
 
+从 Read View 角度看：
+
+READ COMMITTED：
+    每条普通 SELECT 都创建新的 Read View。
+    所以一个事务内，后一次 SELECT 可以看到其他事务刚提交的数据。
+    因此解决脏读，但可能不可重复读和幻读。
+
+REPEATABLE READ：
+    一个事务内第一次普通 SELECT 创建 Read View。
+    后续普通 SELECT 复用同一个 Read View。
+    所以一个事务内多次读取结果一致。
+    因此解决脏读和不可重复读。
+
+最短记忆：
+
+RC：语句级快照
+RR：事务级快照
+
+或者：
+
+RC：每次 SELECT 重新创建 Read View
+RR：事务内复用第一次 SELECT 的 Read View
 
    
 
